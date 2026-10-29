@@ -4,6 +4,7 @@
 Примеры:
     python transcribe.py запись.m4a
     python transcribe.py запись.m4a --structure tz
+    python transcribe.py запись.m4a --structure none   # только текст, без промпта
     python transcribe.py запись.m4a --model medium --out результаты/
 """
 import argparse
@@ -104,8 +105,14 @@ def write_outputs(segments, out_dir, stem):
     return plain
 
 
-def structure(transcript, template, model, out_dir, stem):
-    prompt = (PROMPTS_DIR / f"{template}.md").read_text(encoding="utf-8").replace("{transcript}", transcript)
+def structure(transcript, segments, template, model, out_dir, stem):
+    # {transcript} — сплошной текст, {transcript_timed} — каждая фраза со своим таймкодом
+    timed = "\n".join(f"[{fmt_time(start)}] {text}" for start, _, text in segments)
+    prompt = (
+        (PROMPTS_DIR / f"{template}.md").read_text(encoding="utf-8")
+        .replace("{transcript_timed}", timed)
+        .replace("{transcript}", transcript)
+    )
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
         path = out_dir / f"{stem}.prompt-{template}.md"
@@ -138,8 +145,8 @@ def main():
     ap.add_argument("--language", default="ru")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     ap.add_argument("--threads", type=int, default=os.cpu_count() or 4)
-    ap.add_argument("--structure", choices=templates + ["none"], default="none",
-                    help="шаблон структурирования из prompts/ (нужен ANTHROPIC_API_KEY, иначе сохранится промпт)")
+    ap.add_argument("--structure", choices=templates + ["none"], default="qa",
+                    help="шаблон из prompts/, по умолчанию qa — вопрос/ответ с таймкодами (нужен ANTHROPIC_API_KEY, иначе сохранится промпт)")
     ap.add_argument("--llm-model", default="claude-sonnet-5-5")
     args = ap.parse_args()
 
@@ -166,7 +173,7 @@ def main():
     transcript = write_outputs(segments, args.out, stem)
 
     if args.structure != "none":
-        structure(transcript, args.structure, args.llm_model, args.out, stem)
+        structure(transcript, segments, args.structure, args.llm_model, args.out, stem)
 
 
 if __name__ == "__main__":

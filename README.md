@@ -23,8 +23,11 @@ pip install -r requirements.txt
 ## Использование
 
 ```bash
-# Только текст
+# Текст + блоки «вопрос — ответ» с таймкодами (по умолчанию)
 python transcribe.py запись.m4a
+
+# Только текст
+python transcribe.py запись.m4a --structure none
 
 # Текст + ТЗ (нужен ключ Claude API)
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -34,7 +37,7 @@ python transcribe.py запись.m4a --structure tz
 python transcribe.py запись.m4a --structure summary
 ```
 
-Без `ANTHROPIC_API_KEY` флаг `--structure` сохранит **готовый промпт** (`*.prompt-tz.md`) — его можно целиком вставить в любой чат с ИИ.
+Без `ANTHROPIC_API_KEY` сохранится **готовый промпт** (`*.prompt-qa.md`) — его можно целиком вставить в любой чат с ИИ.
 
 ### Что получится в `output/`
 
@@ -43,7 +46,8 @@ python transcribe.py запись.m4a --structure summary
 | `запись.txt` | Чистый текст, разбитый на абзацы по паузам — для копирования в ИИ |
 | `запись.timecodes.txt` | То же с таймкодами `[12:34]` у каждого абзаца |
 | `запись.srt` | Субтитры |
-| `запись.tz.md` / `запись.summary.md` | Структурированный документ (с `--structure`) |
+| `запись.qa.md` | Блоки «[таймкод] Вопрос → Ответ», каждый вопрос отдельно (шаблон по умолчанию) |
+| `запись.tz.md` / `запись.summary.md` | ТЗ или конспект (с `--structure tz` / `summary`) |
 
 ### Опции
 
@@ -53,7 +57,7 @@ python transcribe.py запись.m4a --structure summary
 | `--device` | `auto` | `cuda` для видеокарты NVIDIA, иначе `cpu` |
 | `--language` | `ru` | Язык записи |
 | `--out` | `output` | Папка результатов |
-| `--structure` | `none` | Шаблон из `prompts/`: `tz`, `summary` |
+| `--structure` | `qa` | Шаблон из `prompts/`: `qa`, `tz`, `summary` или `none` |
 
 ## Скорость
 
@@ -62,4 +66,4 @@ python transcribe.py запись.m4a --structure summary
 
 ## Свои шаблоны
 
-Положите файл `prompts/<имя>.md` с плейсхолдером `{transcript}` — он сразу станет доступен как `--structure <имя>`.
+Положите файл `prompts/<имя>.md` с плейсхолдером `{transcript}` (сплошной текст) или `{transcript_timed}` (каждая фраза с таймкодом) — он сразу станет доступен как `--structure <имя>`.
