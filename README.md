@@ -32,6 +32,9 @@ python transcribe.py запись.m4a --speakers 4
 # Встреча записана несколькими файлами — один документ со сквозными таймкодами и спикерами
 python transcribe.py часть1.m4a часть2.m4a --name встреча
 
+# С анкетой встречи (вопросы, контроли) — ИИ исправит по ней термины и проставит номера пунктов
+python transcribe.py запись.m4a --context анкета.md
+
 # Только текст
 python transcribe.py запись.m4a --structure none
 
@@ -64,6 +67,7 @@ python transcribe.py запись.m4a --structure summary
 | `--language` | `ru` | Язык записи |
 | `--out` | `output` | Папка результатов |
 | `--name` | имя 1-го файла | Имя файлов результата |
+| `--context` | — | Файл с вопросами/контролями/терминами встречи |
 | `--speakers` | авто | Число участников, если известно |
 | `--no-speakers` | — | Не размечать спикеров |
 | `--structure` | `qa` | Шаблон из `prompts/`: `qa`, `tz`, `summary` или `none` |

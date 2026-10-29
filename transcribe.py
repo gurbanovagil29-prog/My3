@@ -8,6 +8,7 @@
     python transcribe.py запись.m4a --speakers 3      # если точно знаете число участников
     python transcribe.py запись.m4a --model medium --out результаты/
     python transcribe.py часть1.m4a часть2.m4a        # несколько частей одной встречи -> один документ
+    python transcribe.py запись.m4a --context анкета.md  # вопросы/контроли встречи — для исправления терминов
 """
 import argparse
 import json
@@ -160,7 +161,18 @@ def write_outputs(utterances, out_dir, stem):
     return plain
 
 
-def structure(transcript, utterances, template, model, out_dir, stem):
+CONTEXT_INTRO = """Справочные материалы к встрече (список вопросов, контролей, терминов). Используй их, чтобы
+исправлять ошибки распознавания в терминах, названиях документов и систем, и сопоставлять обсуждение
+с пунктами материалов. Не добавляй из них в документ то, что на встрече не обсуждалось.
+
+{context}
+
+---
+
+"""
+
+
+def structure(transcript, utterances, template, model, out_dir, stem, context=None):
     # {transcript} — сплошной текст, {transcript_timed} — каждая фраза со своим таймкодом и спикером
     timed = "\n".join(f"[{fmt_time(s)}] {speaker_prefix(spk)}{t}" for s, _, t, spk in utterances)
     prompt = (
@@ -168,6 +180,8 @@ def structure(transcript, utterances, template, model, out_dir, stem):
         .replace("{transcript_timed}", timed)
         .replace("{transcript}", transcript)
     )
+    if context:
+        prompt = CONTEXT_INTRO.replace("{context}", context.strip()) + prompt
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
         path = out_dir / f"{stem}.prompt-{template}.md"
@@ -207,10 +221,12 @@ def main():
     ap.add_argument("--speakers", type=int, default=None,
                     help="число участников, если известно (иначе определяется автоматически)")
     ap.add_argument("--no-speakers", action="store_true", help="не размечать спикеров")
+    ap.add_argument("--context", type=Path,
+                    help="файл со списком вопросов/контролей/терминов встречи — помогает исправить ошибки распознавания")
     ap.add_argument("--llm-model", default="claude-sonnet-5-5")
     args = ap.parse_args()
 
-    for path in args.audio:
+    for path in args.audio + ([args.context] if args.context else []):
         if not path.exists():
             sys.exit(f"Файл не найден: {path}")
 
@@ -247,7 +263,8 @@ def main():
     transcript = write_outputs(utterances, args.out, stem)
 
     if args.structure != "none":
-        structure(transcript, utterances, args.structure, args.llm_model, args.out, stem)
+        context = args.context.read_text(encoding="utf-8") if args.context else None
+        structure(transcript, utterances, args.structure, args.llm_model, args.out, stem, context)
 
 
 if __name__ == "__main__":
