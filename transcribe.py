@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Нейродиктофон: аудио -> текст (faster-whisper) -> структурированный документ (Claude, опционально).
+"""Нейродиктофон: аудио -> текст (faster-whisper) + спикеры -> структурированный документ (Claude, опционально).
 
 Примеры:
     python transcribe.py запись.m4a
     python transcribe.py запись.m4a --structure tz
     python transcribe.py запись.m4a --structure none   # только текст, без промпта
+    python transcribe.py запись.m4a --speakers 3      # если точно знаете число участников
     python transcribe.py запись.m4a --model medium --out результаты/
 """
 import argparse
 import os
+import re
 import subprocess
 import sys
 import time
@@ -17,6 +19,12 @@ from pathlib import Path
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 PAUSE_FOR_PARAGRAPH = 2.0  # сек тишины, после которой начинается новый абзац
 MAX_PARAGRAPH_CHARS = 700
+# Фразы, которые Whisper «додумывает» на тишине и шуме (выучены на субтитрах к видео)
+HALLUCINATIONS = re.compile(
+    r"^(продолжение следует|субтитры (сделал|создавал|подготовил)|редактор субтитров|корректор|"
+    r"спасибо за просмотр|подписывайтесь на канал|ставьте лайки)",
+    re.IGNORECASE,
+)
 
 
 def fmt_time(seconds, srt=False):
@@ -54,6 +62,7 @@ def transcribe(audio, model_name, language, device, threads):
         vad_parameters={"min_silence_duration_ms": 500},
         condition_on_previous_text=False,  # меньше «зацикливаний» на длинных записях
         initial_prompt="Расшифровка аудиозаписи на русском языке, с пунктуацией.",
+        word_timestamps=True,  # нужно, чтобы резать фразы по предложениям при разметке спикеров
     )
     duration = info.duration
     print(f"Длительность: {fmt_time(duration)}, язык: {info.language}", file=sys.stderr)
@@ -61,8 +70,8 @@ def transcribe(audio, model_name, language, device, threads):
     result, started = [], time.time()
     for seg in segments:
         text = seg.text.strip()
-        if text:
-            result.append((seg.start, seg.end, text))
+        if text and not HALLUCINATIONS.match(text):
+            result.append(seg)
         elapsed = time.time() - started
         pct = seg.end / duration * 100 if duration else 0
         eta = elapsed / seg.end * (duration - seg.end) if seg.end else 0
@@ -72,27 +81,35 @@ def transcribe(audio, model_name, language, device, threads):
     return result
 
 
-def to_paragraphs(segments):
+def speaker_prefix(speaker):
+    return f"Спикер {speaker}: " if speaker else ""
+
+
+def to_paragraphs(utterances):
+    """Абзац заканчивается при смене спикера, долгой паузе или когда он стал слишком длинным."""
     paragraphs, current, prev_end = [], [], None
-    for start, end, text in segments:
+    for start, end, text, speaker in utterances:
+        new_speaker = current and speaker != current[0][2]
         long_pause = prev_end is not None and start - prev_end > PAUSE_FOR_PARAGRAPH
-        too_long = sum(len(t) for _, t in current) > MAX_PARAGRAPH_CHARS
-        if current and (long_pause or (too_long and current[-1][1].endswith((".", "!", "?")))):
+        too_long = sum(len(t) for _, t, _ in current) > MAX_PARAGRAPH_CHARS
+        if current and (new_speaker or long_pause or (too_long and current[-1][1].endswith((".", "!", "?")))):
             paragraphs.append(current)
             current = []
-        current.append((start, text))
+        current.append((start, text, speaker))
         prev_end = end
     if current:
         paragraphs.append(current)
     return paragraphs
 
 
-def write_outputs(segments, out_dir, stem):
-    paragraphs = to_paragraphs(segments)
-    plain = "\n\n".join(" ".join(t for _, t in p) for p in paragraphs)
-    timed = "\n\n".join(f"[{fmt_time(p[0][0])}] " + " ".join(t for _, t in p) for p in paragraphs)
+def write_outputs(utterances, out_dir, stem):
+    paragraphs = to_paragraphs(utterances)
+    body = [speaker_prefix(p[0][2]) + " ".join(t for _, t, _ in p) for p in paragraphs]
+    plain = "\n\n".join(body)
+    timed = "\n\n".join(f"[{fmt_time(p[0][0])}] {b}" for p, b in zip(paragraphs, body))
     srt = "\n".join(
-        f"{i}\n{fmt_time(s, True)} --> {fmt_time(e, True)}\n{t}\n" for i, (s, e, t) in enumerate(segments, 1)
+        f"{i}\n{fmt_time(s, True)} --> {fmt_time(e, True)}\n{f'[Спикер {spk}] ' if spk else ''}{t}\n"
+        for i, (s, e, t, spk) in enumerate(utterances, 1)
     )
     files = {
         out_dir / f"{stem}.txt": plain + "\n",
@@ -105,9 +122,9 @@ def write_outputs(segments, out_dir, stem):
     return plain
 
 
-def structure(transcript, segments, template, model, out_dir, stem):
-    # {transcript} — сплошной текст, {transcript_timed} — каждая фраза со своим таймкодом
-    timed = "\n".join(f"[{fmt_time(start)}] {text}" for start, _, text in segments)
+def structure(transcript, utterances, template, model, out_dir, stem):
+    # {transcript} — сплошной текст, {transcript_timed} — каждая фраза со своим таймкодом и спикером
+    timed = "\n".join(f"[{fmt_time(s)}] {speaker_prefix(spk)}{t}" for s, _, t, spk in utterances)
     prompt = (
         (PROMPTS_DIR / f"{template}.md").read_text(encoding="utf-8")
         .replace("{transcript_timed}", timed)
@@ -147,6 +164,9 @@ def main():
     ap.add_argument("--threads", type=int, default=os.cpu_count() or 4)
     ap.add_argument("--structure", choices=templates + ["none"], default="qa",
                     help="шаблон из prompts/, по умолчанию qa — вопрос/ответ с таймкодами (нужен ANTHROPIC_API_KEY, иначе сохранится промпт)")
+    ap.add_argument("--speakers", type=int, default=None,
+                    help="число участников, если известно (иначе определяется автоматически)")
+    ap.add_argument("--no-speakers", action="store_true", help="не размечать спикеров")
     ap.add_argument("--llm-model", default="claude-sonnet-5-5")
     args = ap.parse_args()
 
@@ -170,10 +190,16 @@ def main():
     segments = transcribe(audio, args.model, args.language, device, args.threads)
     print(f"Распознано за {fmt_time(time.time() - started)}", file=sys.stderr)
 
-    transcript = write_outputs(segments, args.out, stem)
+    if args.no_speakers:
+        utterances = [(seg.start, seg.end, seg.text.strip(), None) for seg in segments]
+    else:
+        from diarize import diarize
+        utterances = diarize(audio, segments, args.threads, args.speakers)
+
+    transcript = write_outputs(utterances, args.out, stem)
 
     if args.structure != "none":
-        structure(transcript, segments, args.structure, args.llm_model, args.out, stem)
+        structure(transcript, utterances, args.structure, args.llm_model, args.out, stem)
 
 
 if __name__ == "__main__":

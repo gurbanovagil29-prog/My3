@@ -1,2 +1,3 @@
 faster-whisper>=1.1
 anthropic>=0.40
+sherpa-onnx>=1.10
