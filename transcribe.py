@@ -7,14 +7,17 @@
     python transcribe.py запись.m4a --structure none   # только текст, без промпта
     python transcribe.py запись.m4a --speakers 3      # если точно знаете число участников
     python transcribe.py запись.m4a --model medium --out результаты/
+    python transcribe.py часть1.m4a часть2.m4a        # несколько частей одной встречи -> один документ
 """
 import argparse
+import json
 import os
 import re
 import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 PAUSE_FOR_PARAGRAPH = 2.0  # сек тишины, после которой начинается новый абзац
@@ -83,6 +86,41 @@ def transcribe(audio, model_name, language, device, threads):
 
 def speaker_prefix(speaker):
     return f"Спикер {speaker}: " if speaker else ""
+
+
+def transcribe_cached(path, audio, args, device):
+    """Распознаёт файл, сохраняя результат в output/.cache — повторный запуск (например, с новой частью) не пересчитывает."""
+    cache = args.out / ".cache" / f"{path.stem}.{args.model}.{args.language}.json"
+    if cache.exists():
+        print(f"{path.name}: распознавание взято из кэша", file=sys.stderr)
+        data = json.loads(cache.read_text(encoding="utf-8"))
+    else:
+        started = time.time()
+        segments = transcribe(audio, args.model, args.language, device, args.threads)
+        print(f"Распознано за {fmt_time(time.time() - started)}", file=sys.stderr)
+        data = [
+            {"start": seg.start, "end": seg.end, "text": seg.text,
+             "words": [{"start": w.start, "end": w.end, "word": w.word} for w in (seg.words or [])]}
+            for seg in segments
+        ]
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return [
+        SimpleNamespace(start=d["start"], end=d["end"], text=d["text"],
+                        words=[SimpleNamespace(**w) for w in d["words"]])
+        for d in data
+    ]
+
+
+def shift(segments, offset):
+    """Сдвигает таймкоды части, чтобы они продолжали предыдущую."""
+    for seg in segments:
+        seg.start += offset
+        seg.end += offset
+        for w in seg.words:
+            w.start += offset
+            w.end += offset
+    return segments
 
 
 def to_paragraphs(utterances):
@@ -155,7 +193,9 @@ def structure(transcript, utterances, template, model, out_dir, stem):
 def main():
     templates = sorted(p.stem for p in PROMPTS_DIR.glob("*.md"))
     ap = argparse.ArgumentParser(description="Аудио -> текст -> структурированный документ")
-    ap.add_argument("audio", type=Path, help="файл записи (m4a, mp3, wav, ogg, ...)")
+    ap.add_argument("audio", type=Path, nargs="+",
+                    help="файл записи (m4a, mp3, wav, ogg, ...); несколько частей одной встречи — по порядку")
+    ap.add_argument("--name", help="имя результатов (по умолчанию — имя первого файла)")
     ap.add_argument("--out", type=Path, default=Path("output"), help="папка для результатов (по умолчанию output/)")
     ap.add_argument("--model", default="large-v3-turbo",
                     help="модель Whisper: large-v3-turbo (по умолчанию), large-v3, medium, small")
@@ -170,8 +210,9 @@ def main():
     ap.add_argument("--llm-model", default="claude-sonnet-5-5")
     args = ap.parse_args()
 
-    if not args.audio.exists():
-        sys.exit(f"Файл не найден: {args.audio}")
+    for path in args.audio:
+        if not path.exists():
+            sys.exit(f"Файл не найден: {path}")
 
     device = args.device
     if device == "auto":
@@ -182,13 +223,20 @@ def main():
             device = "cpu"
 
     args.out.mkdir(parents=True, exist_ok=True)
-    stem = args.audio.stem
+    stem = args.name or args.audio[0].stem
 
-    print("Конвертация аудио...", file=sys.stderr)
-    audio = load_audio(args.audio)
-    started = time.time()
-    segments = transcribe(audio, args.model, args.language, device, args.threads)
-    print(f"Распознано за {fmt_time(time.time() - started)}", file=sys.stderr)
+    import numpy as np
+
+    parts, segments, offset = [], [], 0.0
+    for i, path in enumerate(args.audio, 1):
+        print(f"[{i}/{len(args.audio)}] {path.name}: конвертация аудио...", file=sys.stderr)
+        audio = load_audio(path)
+        segments += shift(transcribe_cached(path, audio, args, device), offset)
+        if len(args.audio) > 1:
+            print(f"  часть {i} начинается с {fmt_time(offset)}", file=sys.stderr)
+        parts.append(audio)
+        offset += len(audio) / 16000
+    audio = np.concatenate(parts)  # спикеры размечаются по всем частям сразу — номера сквозные
 
     if args.no_speakers:
         utterances = [(seg.start, seg.end, seg.text.strip(), None) for seg in segments]
